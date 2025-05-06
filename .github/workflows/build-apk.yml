@@ -43,8 +43,8 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: >
-            build-tools;${{ env.ANDROID_BUILD_TOOLS }},
-            platform-tools,
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+            platform-tools
             platforms;${{ env.ANDROID_PLATFORM }}
 
       #----------------------------------------

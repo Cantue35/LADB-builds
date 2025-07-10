@@ -1,0 +1,163 @@
+name: Build & Release APK
+on: workflow_dispatch
+
+# Tightest default token permissions
+permissions:
+  contents: write   # push tag, create release
+  actions: read
+
+env:
+  ANDROID_BUILD_TOOLS: "34.0.0"   # bump here when new tools land
+  ANDROID_PLATFORM:    "android-33" # matches compileSdk
+
+# ────────────────────────────────────────────────────────────────
+# JOB 1 ─ BUILD     signs APK and uploads artefact
+# ────────────────────────────────────────────────────────────────
+jobs:
+  build:
+    name: Build & Sign APK
+    runs-on: ubuntu-latest
+    outputs:
+      build_tag: ${{ steps.version.outputs.build_tag }}
+    permissions:
+      contents: write            # needed to push the tag
+
+    steps:
+      #----------------------------------------
+      # 1. Checkout full history (needed for tagging)
+      #----------------------------------------
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      #----------------------------------------
+      # 2. JDK 17
+      #----------------------------------------
+      - uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      #----------------------------------------
+      # 3. Android SDK + Build‑Tools + platform
+      #----------------------------------------
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: >
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+            platform-tools
+            platforms;${{ env.ANDROID_PLATFORM }}
+
+      #----------------------------------------
+      # 4. Cache Gradle
+      #----------------------------------------
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      #----------------------------------------
+      # 5. Compute version & tag (don’t push yet)
+      #----------------------------------------
+      - name: Compute version & tag
+        id: version
+        shell: bash
+        run: |
+          base_version=$(grep -m1 'versionName "' app/build.gradle | sed -E 's/.*versionName "([^"]+)".*/\1/')
+          if [ -z "$base_version" ]; then
+            echo "Error: Could not extract versionName from app/build.gradle"
+            exit 1
+          fi
+          ts=$(date +%Y%m%d%H%M%S)
+          tag="v${base_version}-${ts}"
+          echo "build_tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "BUILD_TAG=$tag" >>"$GITHUB_ENV"
+
+      #----------------------------------------
+      # 6. Assemble release APK
+      #----------------------------------------
+      - run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      #----------------------------------------
+      # 7. Sign & align
+      #----------------------------------------
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > upload.jks
+
+      - name: Zip-align
+        run: |
+          ${ANDROID_HOME}/build-tools/${{ env.ANDROID_BUILD_TOOLS }}/zipalign -v -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            aligned.apk
+
+      - name: Sign with apksigner
+        run: |
+          ${ANDROID_HOME}/build-tools/${{ env.ANDROID_BUILD_TOOLS }}/apksigner sign \
+            --ks upload.jks \
+            --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+            --ks-pass pass:"${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass pass:"${{ secrets.KEY_PASSWORD }}" \
+            --out signed.apk aligned.apk
+
+      #----------------------------------------
+      # 8. Push tag only if everything worked
+      #----------------------------------------
+      - name: Push git tag
+        if: success()
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name  "GitHub Actions"
+          git tag "$BUILD_TAG"
+          git push origin "$BUILD_TAG"
+
+      #----------------------------------------
+      # 9. Upload artefact for release job
+      #----------------------------------------
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: signed.apk
+          if-no-files-found: error   # fail early if missing
+
+# ────────────────────────────────────────────────────────────────
+# JOB 2 ─ RELEASE     attaches APK to GitHub Release
+# ────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      #----------------------------------------
+      # 1. Checkout (ensure tag is present)
+      #----------------------------------------
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      #----------------------------------------
+      # 2. Download APK artifact
+      #----------------------------------------
+      - uses: actions/download-artifact@v4
+        with: { name: apk, path: dist }
+
+      #----------------------------------------
+      # 3. Sanity check download (optional)
+      #----------------------------------------
+      - run: ls -lh dist
+
+      #----------------------------------------
+      # 4. Publish GitHub Release
+      #----------------------------------------
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.build_tag }}
+          name: Release ${{ needs.build.outputs.build_tag }}
+          files: dist/signed.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

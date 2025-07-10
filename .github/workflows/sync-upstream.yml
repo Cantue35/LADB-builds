@@ -1,0 +1,35 @@
+name: "Sync Upstream"
+
+on:
+  schedule:
+    #- cron: "0 0 1 * *"  # run at midnight UTC on the first day of every month
+    - cron: "0 0 1 1,4,7,10 *"  # runs at midnight UTC on Jan 1, Apr 1, Jul 1, and Oct 1
+  workflow_dispatch:
+
+jobs:
+  sync_latest_from_upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      has_new_commits: ${{ steps.sync.outputs.has_new_commits }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync Upstream Changes
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+        with:
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          upstream_sync_branch: main
+          upstream_sync_repo: tytydraco/LADB
+        env:
+          UNSHALLOW: true
+
+      - name: Trigger Build if New Commits Detected
+        if: steps.sync.outputs.has_new_commits == 'true'
+        uses: benc-uk/workflow-dispatch@v1.2.4
+        with:
+          workflow: build-apk.yml

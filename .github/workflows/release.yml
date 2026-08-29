@@ -1,4 +1,4 @@
-name: Release APK
+name: Release
 
 on:
   workflow_dispatch:
@@ -12,27 +12,27 @@ concurrency:
 
 jobs:
   release:
-    name: Build, sign and publish
+    name: Release
     runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     steps:
-      - name: Require main branch
+      - name: Check branch
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
-            echo "::error title=Wrong branch::Run releases from the main branch."
+            echo "::error::Run this workflow from main."
             exit 1
           fi
 
-      - name: Check out source
+      - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require current upstream
+      - name: Check upstream
         shell: bash
         run: |
           set -euo pipefail
@@ -40,44 +40,44 @@ jobs:
           git fetch --no-tags upstream main
 
           if ! git merge-base --is-ancestor upstream/main HEAD; then
-            echo "::error title=Fork is behind upstream::Merge and review upstream/main before publishing a signed APK."
+            echo "::error::main is behind upstream/main."
             git log --oneline --no-decorate HEAD..upstream/main
             exit 1
           fi
 
-      - name: Set up Java 17
+      - name: Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-provider: basic
 
-      - name: Compute release metadata
+      - name: Version
         id: meta
         shell: bash
         run: |
           set -euo pipefail
           version="$(sed -n 's/^[[:space:]]*versionName "\([^"]*\)".*/\1/p' app/build.gradle | head -n 1)"
           if [[ -z "$version" ]]; then
-            echo "::error title=Version not found::Could not read versionName from app/build.gradle."
+            echo "::error::versionName not found."
             exit 1
           fi
 
-          tag="v${version}-cantue.${GITHUB_RUN_NUMBER}"
-          apk="LADB-${version}-cantue.${GITHUB_RUN_NUMBER}.apk"
+          timestamp="$(date -u +%Y%m%d%H%M%S)"
+          tag="v${version}-${timestamp}"
+          apk="LADB-${version}.apk"
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "apk=$apk" >> "$GITHUB_OUTPUT"
 
-      - name: Build off-Play release
+      - name: Build
         run: ./gradlew :app:assembleRelease -PRELEASE_ANTIPIRACY=false --no-daemon --stacktrace
 
-      - name: Prepare signing key
+      - name: Load key
         shell: bash
         env:
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
@@ -86,7 +86,7 @@ jobs:
           umask 077
           printf '%s' "$ANDROID_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/ladb-release.jks"
 
-      - name: Align, sign and verify APK
+      - name: Sign
         shell: bash
         env:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -120,29 +120,13 @@ jobs:
           (cd dist && sha256sum "$APK_NAME" > "$APK_NAME.sha256")
           cp LICENSE dist/LICENSE.txt
 
-      - name: Write release notes
-        shell: bash
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-        run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/release-notes.md" <<EOF_NOTES
-          Unofficial GitHub build of LADB ${VERSION} from commit ${GITHUB_SHA}.
-
-          This APK is built from the upstream LADB source. The release workflow sets RELEASE_ANTIPIRACY=false at build time because Google Play Licensing cannot validate an APK installed outside Google Play.
-
-          The APK is signed with the Cantue35 release key. Updates from this fork must keep using that same signing key.
-
-          See LICENSE in the repository for the upstream redistribution terms.
-          EOF_NOTES
-
-      - name: Publish GitHub release
+      - name: Publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_PROMPT_DISABLED: '1'
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
           APK_NAME: ${{ steps.meta.outputs.apk }}
-          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
@@ -151,10 +135,10 @@ jobs:
             "dist/$APK_NAME.sha256" \
             "dist/LICENSE.txt" \
             --target "$GITHUB_SHA" \
-            --title "LADB ${VERSION} - Cantue35 build ${GITHUB_RUN_NUMBER}" \
-            --notes-file "$RUNNER_TEMP/release-notes.md"
+            --title "Release $RELEASE_TAG" \
+            --notes ""
 
-      - name: Remove signing material
+      - name: Cleanup
         if: always()
         shell: bash
         run: rm -f "$RUNNER_TEMP/ladb-release.jks" "$RUNNER_TEMP/ladb-aligned.apk"

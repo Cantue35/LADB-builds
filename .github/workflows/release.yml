@@ -146,6 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             "dist/$APK_NAME" \
             "dist/$APK_NAME.sha256" \
             "dist/LICENSE.txt" \
